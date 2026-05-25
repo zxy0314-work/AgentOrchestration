@@ -7,6 +7,11 @@ from typing import Dict, Optional
 from pathlib import Path
 
 
+class SandboxPathError(ValueError):
+    """Raised when a child path fails sandbox ownership validation."""
+    pass
+
+
 class ResourceLimits:
     def __init__(self, cpu_time: int = 60, memory_mb: int = 512, disk_mb: int = 100):
         self.cpu_time = cpu_time
@@ -20,7 +25,8 @@ class AgentSandbox:
         self._sandboxes: Dict[str, Path] = {}
 
     def create(self, agent_id: str, limits: Optional[ResourceLimits] = None) -> Path:
-        sandbox_path = self.base_path / agent_id
+        safe_id = self.safe_child_path(agent_id)
+        sandbox_path = self.base_path / safe_id
         sandbox_path.mkdir(parents=True, exist_ok=True)
         self._sandboxes[agent_id] = sandbox_path
         return sandbox_path
@@ -35,6 +41,78 @@ class AgentSandbox:
 
     def get_path(self, agent_id: str) -> Optional[Path]:
         return self._sandboxes.get(agent_id)
+
+    def safe_child_path(self, child_name: str) -> str:
+        """Validate that a child path name is safe and sandbox-owned.
+
+        Checks:
+        - Not an absolute path
+        - Contains no parent directory traversal ('..')
+        - Contains no null bytes
+        - Normalized form equals original (no hidden traversal)
+
+        Returns:
+            The normalized, safe path string.
+
+        Raises:
+            SandboxPathError: If the child name fails any validation.
+        """
+        if not child_name:
+            raise SandboxPathError("Child path name must not be empty")
+
+        if "\x00" in child_name:
+            raise SandboxPathError("Child path name contains null bytes")
+
+        if os.path.isabs(child_name):
+            raise SandboxPathError(
+                f"Child path name must not be absolute: {child_name!r}"
+            )
+
+        # Split into parts and check each for '..'
+        parts = Path(child_name).parts
+        if ".." in parts:
+            raise SandboxPathError(
+                f"Child path name must not contain '..': {child_name!r}"
+            )
+
+        # Normalize to catch disguised traversal (e.g. foo/bar/../../baz)
+        normalized = os.path.normpath(child_name)
+        if normalized.startswith("..") or normalized == "..":
+            raise SandboxPathError(
+                f"Child path name escapes sandbox after normalization: {child_name!r}"
+            )
+
+        # Reject if the normalized form would escape
+        # (e.g. "foo/../../etc/passwd" normalizes to "../etc/passwd")
+        normalized_parts = Path(normalized).parts
+        if ".." in normalized_parts:
+            raise SandboxPathError(
+                f"Child path name contains '..' after normalization: {child_name!r}"
+            )
+
+        return normalized
+
+    def child_path(self, agent_id: str, child_name: str) -> Path:
+        """Get a sandbox-owned child path for the given agent.
+
+        Validates the child_name via safe_child_path(), then resolves it
+        relative to the agent's sandbox directory.
+
+        Args:
+            agent_id: The registered agent identifier.
+            child_name: The child path name to resolve within the sandbox.
+
+        Returns:
+            A Path object guaranteed to be within the agent's sandbox.
+
+        Raises:
+            SandboxPathError: If child_name is unsafe or agent_id is unknown.
+        """
+        sandbox = self.get_path(agent_id)
+        if sandbox is None:
+            raise SandboxPathError(f"No sandbox found for agent: {agent_id!r}")
+        safe = self.safe_child_path(child_name)
+        return sandbox / safe
 
     def apply_limits(self, agent_id: str, limits: ResourceLimits) -> None:
         try:
