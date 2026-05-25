@@ -31,6 +31,14 @@ class AuthenticationError(AgentOrchestratorError):
         super().__init__(message)
 
 
+class ValidationError(AgentOrchestratorError):
+    """Raised when request validation fails."""
+
+    def __init__(self, message: str, status_code: int = 422):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class RateLimitError(AgentOrchestratorError):
     def __init__(self, retry_after: int = 60):
         super().__init__(f"Rate limit exceeded. Retry after {retry_after}s")
