@@ -1,0 +1,23 @@
+# Auto-detect and normalize line endings
+# Text files are normalized to LF in the repository
+* text=auto
+
+# Explicitly declare LF for all source files
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.txt text eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+
+# Binary files should remain untouched
+*.png binary
+*.jpg binary
+*.ico binary
+*.pyc binary

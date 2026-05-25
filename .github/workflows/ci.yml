@@ -27,3 +27,57 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  # Verify checksum reproducibility across runner types
+  checksum:
+    needs: [test]
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Generate release checksums
+        run: python scripts/verify_checksums.py --generate
+      - name: Upload checksum manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums-${{ runner.os }}
+          path: release_checksums.json
+
+  # Compare checksums from different runners
+  checksum-verify:
+    needs: [checksum]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all checksum manifests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: checksums-*
+          merge-multiple: true
+      - name: Verify checksum consistency
+        run: |
+          echo "Comparing checksum manifests across runners..."
+          files=(checksums-*.json)
+          if [ ${#files[@]} -lt 2 ]; then
+            echo "Need at least 2 manifests to compare — got ${#files[@]}"
+            exit 1
+          fi
+          reference="${files[0]}"
+          for f in "${files[@]:1}"; do
+            echo "Comparing $reference vs $f ..."
+            if ! diff <(jq --sort-keys . "$reference") <(jq --sort-keys . "$f"); then
+              echo "❌ Checksum drift detected between $reference and $f"
+              echo "Line ending normalization may have failed for some files."
+              exit 1
+            fi
+            echo "✅ Match: $reference == $f"
+          done
+          echo "All checksums match across all runner types. Release is reproducible!"
+      - name: Platform drift test
+        run: python scripts/verify_checksums.py --verify release_checksums.json
