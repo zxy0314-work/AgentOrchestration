@@ -36,12 +36,17 @@ class TaskScheduler:
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._max_retry_metadata = 20
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        # Preserve existing retry/retry_metadata when re-enqueuing a failed task
+        if "retries" not in task:
+            task["retries"] = 0
+        if "retry_metadata" not in task:
+            task["retry_metadata"] = []
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
@@ -72,10 +77,19 @@ class TaskScheduler:
     def complete(self, task_id: str) -> bool:
         return self._in_flight.pop(task_id, None) is not None
 
-    def fail(self, task_id: str, queue: str = "default") -> bool:
+    def fail(self, task_id: str, queue: str = "default", error: Optional[str] = None) -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
             task["retries"] += 1
+            # Append failure metadata and cap growth
+            task["retry_metadata"].append({
+                "attempt": task["retries"],
+                "error": error,
+                "timestamp": time.time(),
+            })
+            if len(task["retry_metadata"]) > self._max_retry_metadata:
+                # Prune oldest entries
+                task["retry_metadata"] = task["retry_metadata"][-self._max_retry_metadata:]
             if task["retries"] < self._max_retries:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
