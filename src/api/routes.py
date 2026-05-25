@@ -1,58 +1,113 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.agent.registry import WorkspaceFilterError, validate_workspace_id
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
+def get_workspace(
+    x_workspace_id: Optional[str] = Header(default=None, alias="X-Workspace-Id"),
+    workspace_id: Optional[str] = Query(default=None),
+) -> str:
+    """Resolve the workspace for the current request.
+
+    Workspace identity may arrive either as the ``X-Workspace-Id`` header
+    (preferred) or as a ``workspace_id`` query parameter. The header wins if
+    both are supplied. Missing or malformed workspaces are rejected at the
+    boundary with a 400 — we never fall through to an unfiltered query.
+    """
+    raw = x_workspace_id if x_workspace_id is not None else workspace_id
+    try:
+        return validate_workspace_id(raw)
+    except WorkspaceFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
-    status_filter = AgentStatus(status) if status else None
-    return {"agents": registry.list(status=status_filter, group=group)}
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+    workspace: str = Depends(get_workspace),
+):
+    """List agents — workspace filter is ALWAYS enforced via the service layer.
+
+    The shared ``registry.list_for_workspace`` function validates inputs and
+    enforces the workspace guard. The router never calls ``registry.list``
+    directly so tenant isolation cannot be bypassed by future refactors.
+    """
+    try:
+        agents = registry.list_for_workspace(
+            workspace_id=workspace,
+            status=status,
+            group=group,
+        )
+    except WorkspaceFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"agents": agents, "workspace_id": workspace}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
-    agent_id = registry.register(name, agent_type, config)
-    return {"agent_id": agent_id, "status": "registered"}
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+    workspace: str = Depends(get_workspace),
+):
+    agent_id = registry.register(name, agent_type, config, workspace_id=workspace)
+    return {"agent_id": agent_id, "status": "registered", "workspace_id": workspace}
 
 
 @router.get("/agents/{agent_id}")
-async def get_agent(agent_id: str):
+async def get_agent(agent_id: str, workspace: str = Depends(get_workspace)):
     agent = registry.get(agent_id)
     if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    # Enforce workspace boundary on single-agent lookup too — never leak
+    # an agent that belongs to a different workspace.
+    if agent.get("workspace_id") != workspace:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 
 
 @router.delete("/agents/{agent_id}")
-async def delete_agent(agent_id: str):
+async def delete_agent(agent_id: str, workspace: str = Depends(get_workspace)):
+    agent = registry.get(agent_id)
+    if not agent or agent.get("workspace_id") != workspace:
+        raise HTTPException(status_code=404, detail="Agent not found")
     if not registry.delete(agent_id):
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"status": "deleted"}
 
 
 @router.post("/agents/{agent_id}/start")
-async def start_agent(agent_id: str):
+async def start_agent(agent_id: str, workspace: str = Depends(get_workspace)):
+    agent = registry.get(agent_id)
+    if not agent or agent.get("workspace_id") != workspace:
+        raise HTTPException(status_code=404, detail="Agent not found")
     if not registry.update_status(agent_id, AgentStatus.RUNNING):
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"status": "started"}
 
 
 @router.post("/agents/{agent_id}/stop")
-async def stop_agent(agent_id: str):
+async def stop_agent(agent_id: str, workspace: str = Depends(get_workspace)):
+    agent = registry.get(agent_id)
+    if not agent or agent.get("workspace_id") != workspace:
+        raise HTTPException(status_code=404, detail="Agent not found")
     if not registry.update_status(agent_id, AgentStatus.PAUSED):
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"status": "stopped"}
 
 
 @router.get("/agents/count")
-async def agent_count():
-    return {"count": registry.count()}
+async def agent_count(workspace: str = Depends(get_workspace)):
+    agents = registry.list_for_workspace(workspace_id=workspace)
+    return {"count": len(agents), "workspace_id": workspace}
 
 # 2019-03-18T11:10:18 update
 
