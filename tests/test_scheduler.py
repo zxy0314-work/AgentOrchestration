@@ -36,6 +36,182 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
+
+class TestCatchUpRetention:
+    """Tests for the atomic catch-up retention window precondition (#4190)."""
+
+    def test_fresh_scheduled_task_promoted(self):
+        """Task within retention window should be promoted on catch-up."""
+        import asyncio
+        import time
+        scheduler = TaskScheduler(retention_window=3600.0)
+        # Schedule a task that is already due (delay=0)
+        tid = scheduler.schedule({"type": "fresh"}, delay=0)
+        # Pretend a tiny amount of time passed
+        time.sleep(0.01)
+        task = asyncio.run(scheduler.dequeue())
+        assert task is not None
+        assert task["id"] == tid
+        assert task["type"] == "fresh"
+
+    def test_stale_task_beyond_retention_dropped(self):
+        """Task older than retention window must be DROPPED, not enqueued."""
+        import asyncio
+        import time
+        scheduler = TaskScheduler(retention_window=60.0)  # 60s window
+        # Manually inject a stale scheduled task (scheduled 1 hour ago)
+        stale_id = "stale-task-1"
+        scheduler._scheduled[stale_id] = time.time() - 3600
+        scheduler._task_store[stale_id] = {
+            "id": stale_id, "type": "stale", "queue": "default", "priority": 0
+        }
+        # Trigger catch-up via dequeue
+        task = asyncio.run(scheduler.dequeue())
+        assert task is None, "Stale task must not be returned"
+        assert stale_id not in scheduler._scheduled
+        assert stale_id not in scheduler._task_store
+        # Queue should be empty (task dropped, not enqueued)
+        assert "default" not in scheduler._queues or len(scheduler._queues["default"]) == 0
+
+    def test_catch_up_returns_counts(self):
+        """_catch_up should report promoted vs dropped counts atomically."""
+        import time
+        scheduler = TaskScheduler(retention_window=60.0)
+        now = time.time()
+
+        # 2 fresh tasks (within window)
+        scheduler._scheduled["fresh-1"] = now - 10
+        scheduler._task_store["fresh-1"] = {"id": "fresh-1", "queue": "default", "priority": 0}
+        scheduler._scheduled["fresh-2"] = now - 20
+        scheduler._task_store["fresh-2"] = {"id": "fresh-2", "queue": "default", "priority": 0}
+
+        # 3 stale tasks (beyond window)
+        for i in range(3):
+            sid = f"stale-{i}"
+            scheduler._scheduled[sid] = now - 3600 - i
+            scheduler._task_store[sid] = {"id": sid, "queue": "default", "priority": 0}
+
+        # Not-yet-due task (future)
+        scheduler._scheduled["future-1"] = now + 3600
+        scheduler._task_store["future-1"] = {"id": "future-1", "queue": "default", "priority": 0}
+
+        result = scheduler._catch_up(now)
+        assert result["promoted"] == 2
+        assert result["dropped"] == 3
+        # Future task untouched
+        assert "future-1" in scheduler._scheduled
+
+    def test_atomic_precondition_no_partial_state(self):
+        """If a task is dropped, it must NOT appear in queue, scheduled, or task_store.
+
+        Validates the atomic check-and-act: precondition failure → full removal,
+        no partial state where the task lingers in one structure.
+        """
+        import time
+        scheduler = TaskScheduler(retention_window=30.0)
+        now = time.time()
+        sid = "atomic-stale"
+        scheduler._scheduled[sid] = now - 9999
+        scheduler._task_store[sid] = {"id": sid, "queue": "q1", "priority": 5}
+
+        scheduler._catch_up(now)
+
+        # All three structures must be consistent: task fully gone, never enqueued.
+        assert sid not in scheduler._scheduled
+        assert sid not in scheduler._task_store
+        assert sid not in scheduler._in_flight
+        # The queue may not even exist since nothing was enqueued
+        q = scheduler._queues.get("q1")
+        assert q is None or len(q) == 0
+
+    def test_boundary_exactly_at_retention_window_is_kept(self):
+        """A task exactly at the retention boundary (age == window) should be KEPT.
+
+        Drop condition uses strict `<` (scheduled_at < deadline), so equal is kept.
+        """
+        import time
+        scheduler = TaskScheduler(retention_window=100.0)
+        now = time.time()
+        sid = "boundary"
+        # scheduled_at == now - 100 == retention_deadline → NOT strictly less → kept
+        scheduler._scheduled[sid] = now - 100.0
+        scheduler._task_store[sid] = {"id": sid, "queue": "default", "priority": 0}
+
+        result = scheduler._catch_up(now)
+        assert result["promoted"] == 1
+        assert result["dropped"] == 0
+
+    def test_default_retention_window(self):
+        """Default retention window is 1 hour (3600s)."""
+        scheduler = TaskScheduler()
+        assert scheduler._retention_window == 3600.0
+
+    def test_custom_retention_window(self):
+        """Retention window is configurable via constructor."""
+        scheduler = TaskScheduler(retention_window=7200.0)
+        assert scheduler._retention_window == 7200.0
+
+    def test_catch_up_preserves_priority_and_queue(self):
+        """Promoted tasks must keep their original queue and priority."""
+        import asyncio
+        import time
+        scheduler = TaskScheduler(retention_window=3600.0)
+        now = time.time()
+        scheduler._scheduled["t1"] = now - 5
+        scheduler._task_store["t1"] = {
+            "id": "t1", "type": "low", "queue": "work", "priority": 1
+        }
+        scheduler._scheduled["t2"] = now - 5
+        scheduler._task_store["t2"] = {
+            "id": "t2", "type": "high", "queue": "work", "priority": 10
+        }
+        scheduler._catch_up(now)
+
+        # High priority should come out first
+        task = asyncio.run(scheduler.dequeue(queue="work"))
+        assert task is not None
+        assert task["type"] == "high"
+
+    def test_dropped_task_logged(self, caplog):
+        """Dropping a stale task should emit a warning log."""
+        import logging
+        import time
+        scheduler = TaskScheduler(retention_window=10.0)
+        now = time.time()
+        sid = "loggable-stale"
+        scheduler._scheduled[sid] = now - 1000
+        scheduler._task_store[sid] = {"id": sid, "queue": "default", "priority": 0}
+
+        with caplog.at_level(logging.WARNING, logger="src.orchestrator.scheduler"):
+            scheduler._catch_up(now)
+
+        assert any("Dropping stale scheduled task" in r.message for r in caplog.records)
+        assert any("catch-up retention precondition failed" in r.message for r in caplog.records)
+
+    def test_mixed_catch_up_atomicity(self):
+        """In one catch-up pass, fresh tasks are promoted while stale ones are dropped — no cross-contamination."""
+        import asyncio
+        import time
+        scheduler = TaskScheduler(retention_window=30.0)
+        now = time.time()
+
+        # Fresh
+        scheduler._scheduled["good-1"] = now - 5
+        scheduler._task_store["good-1"] = {"id": "good-1", "type": "good", "queue": "default", "priority": 0}
+        # Stale
+        scheduler._scheduled["bad-1"] = now - 600
+        scheduler._task_store["bad-1"] = {"id": "bad-1", "type": "bad", "queue": "default", "priority": 0}
+
+        result = scheduler._catch_up(now)
+        assert result == {"promoted": 1, "dropped": 1}
+
+        task = asyncio.run(scheduler.dequeue())
+        assert task is not None
+        assert task["id"] == "good-1"
+        # No more tasks
+        task2 = asyncio.run(scheduler.dequeue())
+        assert task2 is None
+
 # 2019-01-09T19:07:03 update
 
 # 2019-02-18T12:30:02 update
