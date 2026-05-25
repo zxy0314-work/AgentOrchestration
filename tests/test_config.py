@@ -1,5 +1,8 @@
+import json
+import os
+
 import pytest
-from src.common.config import Config
+from src.common.config import Config, ConfigError
 
 
 class TestConfig:
@@ -32,106 +35,121 @@ class TestConfig:
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
 
-# 2019-02-01T18:58:35 update
+    # --- YAML support tests ---
 
-# 2019-07-31T13:45:15 update
+    def test_load_yaml_config(self, tmp_path):
+        """Config.load should support .yaml files."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("app:\n  name: test\n  port: 8080\n")
+        config = Config(str(config_file))
+        assert config.get("app.name") == "test"
+        assert config.get("app.port") == 8080
 
-# 2019-08-09T17:54:41 update
+    def test_load_yml_extension(self, tmp_path):
+        """Config.load should support .yml extension."""
+        config_file = tmp_path / "config.yml"
+        config_file.write_text("database:\n  host: localhost\n  port: 5432\n")
+        config = Config(str(config_file))
+        assert config.get("database.host") == "localhost"
+        assert config.get("database.port") == 5432
 
-# 2019-08-14T16:29:54 update
+    def test_yaml_nested_structures(self, tmp_path):
+        """YAML config should handle deeply nested structures."""
+        config_file = tmp_path / "nested.yaml"
+        config_file.write_text(
+            "server:\n"
+            "  host: 0.0.0.0\n"
+            "  ports:\n"
+            "    http: 8080\n"
+            "    https: 8443\n"
+            "  tls:\n"
+            "    enabled: true\n"
+            "    cert_path: /etc/certs/cert.pem\n"
+        )
+        config = Config(str(config_file))
+        assert config.get("server.host") == "0.0.0.0"
+        assert config.get("server.ports.http") == 8080
+        assert config.get("server.ports.https") == 8443
+        assert config.get("server.tls.enabled") is True
+        assert config.get("server.tls.cert_path") == "/etc/certs/cert.pem"
 
-# 2019-10-11T10:28:34 update
+    def test_yaml_list_values(self, tmp_path):
+        """YAML config should handle list values."""
+        config_file = tmp_path / "list.yaml"
+        config_file.write_text(
+            "features:\n"
+            "  - auth\n"
+            "  - logging\n"
+            "  - metrics\n"
+            "timeout: 30\n"
+        )
+        config = Config(str(config_file))
+        assert config.get("features") == ["auth", "logging", "metrics"]
+        assert config.get("timeout") == 30
+        assert config.get("nonexistent") is None
 
-# 2019-10-25T09:23:55 update
+    def test_yaml_and_json_equivalent(self, tmp_path):
+        """Loading the same data from YAML and JSON should produce identical configs."""
+        json_file = tmp_path / "config.json"
+        yaml_file = tmp_path / "config.yaml"
+        data = {"app": {"name": "test-app", "version": "1.0.0", "debug": False}}
+        json_file.write_text(json.dumps(data))
+        yaml_file.write_text("app:\n  name: test-app\n  version: \"1.0.0\"\n  debug: false\n")
 
-# 2019-12-13T09:04:47 update
+        json_config = Config(str(json_file))
+        yaml_config = Config(str(yaml_file))
+        assert json_config.to_dict() == yaml_config.to_dict()
+        assert json_config.get("app.name") == yaml_config.get("app.name")
 
-# 2020-04-09T10:21:21 update
+    def test_load_rejects_unsupported_extension(self, tmp_path):
+        """Config.load should raise ConfigError for unsupported file extensions."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("[app]\nname = \"test\"\n")
+        with pytest.raises(ConfigError, match="Unsupported config format"):
+            Config(str(config_file))
 
-# 2020-05-08T17:44:24 update
+    def test_load_rejects_no_extension(self, tmp_path):
+        """Config.load should raise ConfigError for files without recognized extensions."""
+        config_file = tmp_path / "config"
+        config_file.write_text("{}")
+        with pytest.raises(ConfigError, match="Unsupported config format"):
+            Config(str(config_file))
 
-# 2020-07-20T13:54:19 update
+    def test_yaml_bad_syntax_raises_error(self, tmp_path):
+        """Config.load should propagate YAML parse errors."""
+        config_file = tmp_path / "bad.yaml"
+        config_file.write_text("key: [unclosed list\n")
+        with pytest.raises(Exception):
+            Config(str(config_file))
 
-# 2020-09-24T15:42:29 update
+    def test_ao_env_overrides_with_yaml(self, tmp_path):
+        """AO_ env overrides should work on top of YAML-loaded config."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("app:\n  name: base\n  port: 3000\n")
+        os.environ["AO_APP_NAME"] = "overridden"
+        try:
+            config = Config(str(config_file))
+            assert config.get("app.name") == "overridden"
+            assert config.get("app.port") == 3000
+        finally:
+            del os.environ["AO_APP_NAME"]
 
-# 2020-12-09T20:16:24 update
+    def test_empty_yaml_config(self, tmp_path):
+        """Loading an empty YAML file should not crash."""
+        config_file = tmp_path / "empty.yaml"
+        config_file.write_text("")
+        config = Config(str(config_file))
+        assert config.to_dict() is None or config.to_dict() == {}
 
-# 2021-04-21T13:19:36 update
-
-# 2021-05-25T09:15:06 update
-
-# 2021-10-13T20:37:29 update
-
-# 2021-11-18T18:37:15 update
-
-# 2021-12-05T14:46:27 update
-
-# 2022-01-19T12:56:31 update
-
-# 2022-03-03T14:31:21 update
-
-# 2022-03-23T08:42:05 update
-
-# 2022-03-23T16:05:36 update
-
-# 2022-07-11T19:00:31 update
-
-# 2022-11-23T12:37:19 update
-
-# 2023-01-16T15:28:31 update
-
-# 2023-02-10T11:37:41 update
-
-# 2023-08-01T09:43:10 update
-
-# 2023-08-25T11:04:56 update
-
-# 2023-09-07T10:18:27 update
-
-# 2023-10-03T08:52:54 update
-
-# 2023-10-11T19:49:55 update
-
-# 2023-12-04T09:53:42 update
-
-# 2024-01-29T14:34:37 update
-
-# 2024-03-27T08:22:58 update
-
-# 2024-07-03T09:52:12 update
-
-# 2024-07-18T12:14:11 update
-
-# 2024-09-12T10:59:12 update
-
-# 2024-09-16T15:56:14 update
-
-# 2024-09-17T19:00:45 update
-
-# 2024-09-25T08:04:43 update
-
-# 2024-12-10T14:49:57 update
-
-# 2024-12-31T08:27:41 update
-
-# 2025-03-18T15:08:24 update
-
-# 2025-05-13T18:23:05 update
-
-# 2025-05-15T19:05:40 update
-
-# 2025-06-09T15:01:44 update
-
-# 2025-07-04T18:13:41 update
-
-# 2025-07-23T15:44:03 update
-
-# 2025-10-16T13:53:26 update
-
-# 2025-11-12T18:42:00 update
-
-# 2026-02-06T08:55:54 update
-
-# 2026-02-11T19:28:37 update
-
-# 2026-04-17T10:00:53 update
+    def test_boolean_in_yaml(self, tmp_path):
+        """YAML boolean values should be loaded as Python bools."""
+        config_file = tmp_path / "bool.yaml"
+        config_file.write_text(
+            "debug: true\n"
+            "production: false\n"
+            "rate: 0.75\n"
+        )
+        config = Config(str(config_file))
+        assert config.get("debug") is True
+        assert config.get("production") is False
+        assert config.get("rate") == 0.75
