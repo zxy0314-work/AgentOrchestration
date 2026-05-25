@@ -1,12 +1,47 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from fastapi import APIRouter, HTTPException, Request
+from typing import Any, Dict, List, Optional
 
-from src.agent import AgentRegistry, AgentStatus
+from src.agent.registry import AgentRegistry, AgentStatus
+from src.orchestrator.run_manager import RunManager
 
 router = APIRouter()
 registry = AgentRegistry()
+run_manager = RunManager()
+
+
+# ---------------------------------------------------------------------------
+# Tenant extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_tenant_id(request: Request) -> str:
+    """Extract tenant ID from X-Tenant-ID header, falling back to Bearer token prefix.
+
+    Resolution order:
+      1. X-Tenant-ID header (highest precedence)
+      2. Bearer token prefix (tenant:session format)
+      3. 'default' (fallback)
+    """
+    # Header takes precedence
+    header_tenant = request.headers.get("X-Tenant-ID")
+    if header_tenant:
+        return header_tenant
+
+    # Try Bearer token prefix
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[len("Bearer "):].strip()
+        if ":" in token:
+            return token.split(":", 1)[0]
+
+    return "default"
+
+
+# ---------------------------------------------------------------------------
+# Agent endpoints
+# ---------------------------------------------------------------------------
 
 
 @router.get("/agents")
@@ -53,6 +88,34 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+# ---------------------------------------------------------------------------
+# Run endpoints — tenant-scoped
+# ---------------------------------------------------------------------------
+
+
+@router.post("/runs")
+async def create_run(agent_id: str, request: Request):
+    """Create a new run for the authenticated tenant."""
+    tenant_id = _get_tenant_id(request)
+    run_id = run_manager.create_run(tenant_id, agent_id)
+    return {"run_id": run_id, "tenant_id": tenant_id}
+
+
+@router.post("/runs/batch-cancel")
+async def batch_cancel_runs(body: Dict[str, List[str]], request: Request):
+    """Cancel multiple runs, scoped to the authenticated tenant.
+
+    Only cancels runs that belong to the tenant derived from the
+    X-Tenant-ID header or Bearer token prefix. Runs owned by other
+    tenants are reported in ``not_owned`` and left untouched.
+    """
+    run_ids = body.get("run_ids", [])
+    tenant_id = _get_tenant_id(request)
+    result = run_manager.batch_cancel(run_ids, tenant_id)
+    result["tenant_id"] = tenant_id
+    return result
 
 # 2019-03-18T11:10:18 update
 
