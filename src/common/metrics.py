@@ -14,38 +14,62 @@ class MetricsCollector:
         self._histograms: Dict[str, List[float]] = defaultdict(list)
         self._timers: Dict[str, float] = {}
 
-    def increment(self, metric: str, value: int = 1) -> None:
+    def increment(self, metric: str, value: int = 1, namespace: str = "") -> None:
         with self._lock:
-            self._counters[metric] += value
+            key = f"{namespace}.{metric}" if namespace else metric
+            self._counters[key] += value
 
-    def gauge(self, metric: str, value: float) -> None:
+    def gauge(self, metric: str, value: float, namespace: str = "") -> None:
         with self._lock:
-            self._gauges[metric] = value
+            key = f"{namespace}.{metric}" if namespace else metric
+            self._gauges[key] = value
 
-    def observe(self, metric: str, value: float) -> None:
+    def observe(self, metric: str, value: float, namespace: str = "") -> None:
         with self._lock:
-            self._histograms[metric].append(value)
+            key = f"{namespace}.{metric}" if namespace else metric
+            self._histograms[key].append(value)
 
-    def start_timer(self, metric: str) -> None:
+    def start_timer(self, metric: str, namespace: str = "") -> None:
         with self._lock:
-            self._timers[metric] = time.time()
+            key = f"{namespace}.{metric}" if namespace else metric
+            self._timers[key] = time.time()
 
-    def stop_timer(self, metric: str) -> float:
+    def stop_timer(self, metric: str, namespace: str = "") -> float:
+        duration = 0.0
         with self._lock:
-            if metric in self._timers:
-                duration = time.time() - self._timers.pop(metric)
+            key = f"{namespace}.{metric}" if namespace else metric
+            if key in self._timers:
+                duration = time.time() - self._timers.pop(key)
+        # Record outside lock to avoid deadlock
+        if duration > 0:
+            if namespace:
+                self.observe(metric, duration, namespace)
+            else:
                 self.observe(metric, duration)
-                return duration
-        return 0.0
+        return duration
 
-    def snapshot(self) -> Dict:
+    def snapshot(self, namespace: str = "") -> Dict:
         with self._lock:
-            return {
+            raw = {
                 "counters": dict(self._counters),
                 "gauges": dict(self._gauges),
                 "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}
                                for k, v in self._histograms.items()},
             }
+            if namespace:
+                prefix = f"{namespace}."
+                filtered = {"counters": {}, "gauges": {}, "histograms": {}}
+                for k, v in raw["counters"].items():
+                    if k.startswith(prefix):
+                        filtered["counters"][k[len(prefix):]] = v
+                for k, v in raw["gauges"].items():
+                    if k.startswith(prefix):
+                        filtered["gauges"][k[len(prefix):]] = v
+                for k, v in raw["histograms"].items():
+                    if k.startswith(prefix):
+                        filtered["histograms"][k[len(prefix):]] = v
+                return filtered
+            return raw
 
 
 metrics = MetricsCollector()
