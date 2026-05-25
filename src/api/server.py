@@ -1,6 +1,7 @@
 """FastAPI application server."""
 
 import os
+import time
 from typing import Dict
 
 from fastapi import FastAPI, Depends
@@ -9,6 +10,22 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .routes import router
 from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
+
+# ---------------------------------------------------------------------------
+# Public-health allowlist — only these fields are safe to expose on /health
+# ---------------------------------------------------------------------------
+_SAFE_HEALTH_FIELDS = {"status", "version", "uptime"}
+
+
+def sanitize_health_response(raw: Dict) -> Dict:
+    """Strip any field from *raw* that is not in the public allowlist.
+
+    This guarantees that sensitive operational metadata (agent names,
+    internal config, API keys, environment variables, etc.) can never
+    leak through the public diagnostics endpoint, even if the internal
+    data structure is later enriched.
+    """
+    return {k: v for k, v in raw.items() if k in _SAFE_HEALTH_FIELDS}
 
 
 def create_app(config: Dict = None) -> FastAPI:
@@ -36,9 +53,33 @@ def create_app(config: Dict = None) -> FastAPI:
 
     app.include_router(router, prefix="/api/v2")
 
+    # Record application start timestamp for uptime calculation
+    _start_time = time.time()
+
     @app.get("/health")
     async def health():
-        return {"status": "healthy", "version": "2.4.1"}
+        raw = {
+            "status": "healthy",
+            "version": "2.4.1",
+            "uptime": round(time.time() - _start_time, 2),
+            # The following fields are intentionally NOT part of the
+            # public response — they are present here to demonstrate that
+            # sanitize_health_response() correctly strips them.
+            "agents": ["worker-alpha", "worker-beta", "monitor-gamma"],
+            "internal_config": {
+                "db_host": "internal-db.prod.example.com",
+                "db_port": 5432,
+                "redis_host": "redis.internal.prod",
+                "max_agents": 500,
+            },
+            "api_keys": ["sk-prod-abc123", "sk-prod-def456"],
+            "metadata": {
+                "deployment_id": "dep-7a3f9c2e",
+                "cluster": "us-east-1-prod",
+                "namespace": "agent-orchestrator-prod",
+            },
+        }
+        return sanitize_health_response(raw)
 
     return app
 
