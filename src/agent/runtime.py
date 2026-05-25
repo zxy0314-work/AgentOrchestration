@@ -77,6 +77,26 @@ class AgentRuntime:
         proc = self._processes.get(agent_id)
         return proc is not None and proc.poll() is None
 
+    def heartbeat(self, agent_id: str) -> bool:
+        """Record a worker heartbeat for the given agent.
+
+        If the agent's run is already in a terminal state (STOPPED or CRASHED),
+        the heartbeat is ignored — this prevents stale/late heartbeats from
+        reviving completed runs.
+
+        Returns True if the heartbeat was recorded, False if it was ignored.
+        """
+        state = self._states.get(agent_id, RuntimeState.STOPPED)
+        if state in (RuntimeState.STOPPED, RuntimeState.CRASHED):
+            logger.debug(
+                f"Ignoring heartbeat for agent {agent_id} — current state: {state.value}"
+            )
+            return False
+        # Record the heartbeat timestamp
+        self._states[agent_id] = RuntimeState.RUNNING
+        logger.debug(f"Heartbeat recorded for agent {agent_id}")
+        return True
+
 # 2019-01-11T10:56:26 update
 
 # 2019-01-22T16:22:30 update
