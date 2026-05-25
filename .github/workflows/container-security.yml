@@ -1,0 +1,218 @@
+name: Container Security Scan
+
+# Issue #3859 fix: Scan ALL worker images produced by the build matrix,
+# not just the default executor image. CI fails if scan coverage is incomplete.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ${{ github.repository_owner }}/agentorchestration
+
+jobs:
+  # ----- Single source of truth: the image matrix -----
+  # Both build and scan jobs consume this list. Adding a new entry here
+  # automatically adds a scan target.
+  define-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.set.outputs.images }}
+    steps:
+      - id: set
+        run: |
+          cat <<'EOF' > /tmp/images.json
+          {
+            "include": [
+              {"name": "executor",  "dockerfile": "docker/Dockerfile.executor",  "context": "."},
+              {"name": "scheduler", "dockerfile": "docker/Dockerfile.scheduler", "context": "."},
+              {"name": "sidecar",   "dockerfile": "docker/Dockerfile.sidecar",   "context": "."},
+              {"name": "worker-py", "dockerfile": "docker/Dockerfile.worker-py", "context": "."},
+              {"name": "worker-js", "dockerfile": "docker/Dockerfile.worker-js", "context": "."}
+            ]
+          }
+          EOF
+          echo "images=$(cat /tmp/images.json | jq -c .)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: define-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.define-matrix.outputs.images) }}
+    outputs:
+      manifest: ${{ steps.digest.outputs.manifest }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${{ matrix.name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+      - name: Record digest
+        id: digest
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${{ matrix.name }}:${{ github.sha }}"
+          mkdir -p /tmp/digests
+          echo "{\"name\":\"${{ matrix.name }}\",\"image\":\"$IMAGE\",\"digest\":\"$DIGEST\"}" \
+            > /tmp/digests/${{ matrix.name }}.json
+          echo "Image $IMAGE -> $DIGEST"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.name }}
+          path: /tmp/digests/${{ matrix.name }}.json
+          retention-days: 1
+
+  # ----- Scan job: SAME matrix, full coverage enforced -----
+  scan:
+    needs: [define-matrix, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.define-matrix.outputs.images) }}
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download digest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-${{ matrix.name }}
+          path: /tmp/digests
+
+      - name: Validate image name (fail on unsupported names)
+        run: |
+          KNOWN_IMAGES="executor scheduler sidecar worker-py worker-js"
+          if ! echo "$KNOWN_IMAGES" | grep -qw "${{ matrix.name }}"; then
+            echo "::error::Unsupported image name: ${{ matrix.name }}"
+            exit 1
+          fi
+
+      - name: Trivy vulnerability scanner
+        id: trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${{ matrix.name }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-${{ matrix.name }}.sarif'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-${{ matrix.name }}.sarif'
+          category: 'container-scan-${{ matrix.name }}'
+
+      - name: Record scan result
+        if: always()
+        run: |
+          mkdir -p /tmp/scan-results
+          STATUS="${{ steps.trivy.outcome }}"
+          DIGEST=$(jq -r .digest /tmp/digests/${{ matrix.name }}.json)
+          echo "{\"image\":\"${{ matrix.name }}\",\"digest\":\"$DIGEST\",\"status\":\"$STATUS\"}" \
+            > /tmp/scan-results/${{ matrix.name }}.json
+
+      - name: Upload scan result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-${{ matrix.name }}
+          path: /tmp/scan-results/${{ matrix.name }}.json
+
+  # ----- Coverage gate: ensure every built image got scanned -----
+  scan-coverage-gate:
+    needs: [define-matrix, build, scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scan-*
+          path: /tmp/all-scans
+          merge-multiple: true
+
+      - name: Download all digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: /tmp/all-digests
+          merge-multiple: true
+
+      - name: Enforce 1:1 scan coverage
+        run: |
+          DIGESTS=$(ls /tmp/all-digests/*.json 2>/dev/null | wc -l)
+          SCANS=$(ls /tmp/all-scans/*.json 2>/dev/null | wc -l)
+          echo "Built image digests: $DIGESTS"
+          echo "Scan results: $SCANS"
+
+          if [ "$DIGESTS" -eq 0 ]; then
+            echo "::error::No image digests recorded — build job failed"
+            exit 1
+          fi
+
+          if [ "$DIGESTS" -ne "$SCANS" ]; then
+            echo "::error::Scan coverage incomplete: $SCANS scans for $DIGESTS images"
+            echo "Missing scans for:"
+            for d in /tmp/all-digests/*.json; do
+              name=$(jq -r .name "$d")
+              if [ ! -f "/tmp/all-scans/${name}.json" ]; then
+                echo "  - $name"
+              fi
+            done
+            exit 1
+          fi
+
+          # Verify each digest has a corresponding scan result
+          for d in /tmp/all-digests/*.json; do
+            name=$(jq -r .name "$d")
+            digest=$(jq -r .digest "$d")
+            scan_file="/tmp/all-scans/${name}.json"
+            if [ ! -f "$scan_file" ]; then
+              echo "::error::Missing scan for image: $name"
+              exit 1
+            fi
+            scan_digest=$(jq -r .digest "$scan_file")
+            if [ "$digest" != "$scan_digest" ]; then
+              echo "::error::Digest mismatch for $name: built=$digest, scanned=$scan_digest"
+              exit 1
+            fi
+          done
+
+          echo "✅ Scan coverage complete: all $DIGESTS images scanned with matching digests"
