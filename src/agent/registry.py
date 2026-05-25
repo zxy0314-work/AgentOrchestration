@@ -6,6 +6,8 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from src.common.errors import ConfigurationError
+
 
 class AgentStatus(Enum):
     PENDING = "pending"
@@ -17,12 +19,42 @@ class AgentStatus(Enum):
 
 
 class AgentRegistry:
+    """Registry for managing agent lifecycle and metadata."""
+
+    # Fields allowed in the config dict passed to register()
+    ALLOWED_CONFIG_FIELDS = {
+        "description",
+        "owner",
+        "tags",
+        "priority",
+        "timeout",
+        "retries",
+        "max_instances",
+        "labels",
+        "metadata",
+        "group",
+        "version",
+        "namespace",
+        "environment",
+        "entrypoint",
+        "args",
+        "env_vars",
+        "resources",
+    }
+
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
 
     def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+        config = config or {}
+        unknown_fields = {k for k in config if k not in self.ALLOWED_CONFIG_FIELDS}
+        if unknown_fields:
+            raise ConfigurationError(
+                f"Unknown config field(s): {', '.join(sorted(unknown_fields))}. "
+                f"Allowed fields: {', '.join(sorted(self.ALLOWED_CONFIG_FIELDS))}"
+            )
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -30,7 +62,7 @@ class AgentRegistry:
             "name": name,
             "type": agent_type,
             "status": AgentStatus.PENDING.value,
-            "config": config or {},
+            "config": config,
             "created_at": timestamp,
             "updated_at": timestamp,
             "version": "1.0.0",
