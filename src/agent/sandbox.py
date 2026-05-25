@@ -9,6 +9,12 @@ from pathlib import Path
 
 class ResourceLimits:
     def __init__(self, cpu_time: int = 60, memory_mb: int = 512, disk_mb: int = 100):
+        if not isinstance(cpu_time, int) or cpu_time <= 0:
+            raise ValueError(f"cpu_time must be a positive integer, got {cpu_time!r}")
+        if not isinstance(memory_mb, int) or memory_mb <= 0:
+            raise ValueError(f"memory_mb must be a positive integer, got {memory_mb!r}")
+        if not isinstance(disk_mb, int) or disk_mb <= 0:
+            raise ValueError(f"disk_mb must be a positive integer, got {disk_mb!r}")
         self.cpu_time = cpu_time
         self.memory_mb = memory_mb
         self.disk_mb = disk_mb
