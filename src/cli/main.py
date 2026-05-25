@@ -11,6 +11,8 @@ def cli():
     parser = argparse.ArgumentParser(description="Agent Orchestrator CLI")
     parser.add_argument("--config", "-c", help="Path to config file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
+    parser.add_argument("--output", "-o", choices=["text", "json", "yaml"], default="text",
+                        help="Output mode (text, json, yaml)")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
