@@ -45,10 +45,20 @@ class AgentRegistry:
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+        include_terminated: bool = False,
+    ) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
+        else:
+            # Exclude terminated/disabled agents from default unfiltered listings
+            # (capability discovery must not leak stale entries)
+            if not include_terminated:
+                agents = [a for a in agents if a["status"] != AgentStatus.TERMINATED.value]
         if group:
             agent_ids = self._index.get(group, [])
             agents = [a for a in agents if a["id"] in agent_ids]
