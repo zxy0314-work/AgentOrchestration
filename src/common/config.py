@@ -44,6 +44,30 @@ class Config:
                 return default
         return current
 
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        """Get a config value as a boolean.
+
+        Handles:
+        - Actual bool values (True/False)
+        - String 'true'/'false' (case-insensitive)
+        - String '1'/'0'
+
+        Args:
+            key: The config key (dot-separated for nested keys).
+            default: Default value if key is not found (default: False).
+
+        Returns:
+            Boolean interpretation of the config value.
+        """
+        value = self.get(key)
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1")
+        return default
+
     def set(self, key: str, value: Any) -> None:
         self._set_nested(key, value)
 
